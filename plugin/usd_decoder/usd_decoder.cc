@@ -1900,6 +1900,16 @@ void ParseConstraint(mjSpec* spec, const pxr::UsdPrim& prim, mjsBody* body,
 
     auto stage = prim.GetStage();
 
+    // Get the default prim path to identify the world body.
+    pxr::SdfPath default_prim_path;
+    if (stage->GetDefaultPrim().IsValid()) {
+      default_prim_path = stage->GetDefaultPrim().GetPath();
+    }
+    
+    // Map default prim to world body (empty path means world in MuJoCo).
+    bool body0_is_world = body0_path.IsEmpty() || body0_path == default_prim_path;
+    bool body1_is_world = body1_path.IsEmpty() || body1_path == default_prim_path;
+
     auto body0_prim = stage->GetPrimAtPath(body0_path);
     auto body1_prim = stage->GetPrimAtPath(body1_path);
 
@@ -1930,8 +1940,9 @@ void ParseConstraint(mjSpec* spec, const pxr::UsdPrim& prim, mjsBody* body,
       mjs_setString(eq->name2, body1_path.GetAsString().c_str());
       eq->objtype = mjOBJ_SITE;
     } else {
-      mjs_setString(eq->name1, body0_path.GetAsString().c_str());
-      mjs_setString(eq->name2, body1_path.GetAsString().c_str());
+      // For body welds, use "world" for the world body, otherwise use the USD path.
+      mjs_setString(eq->name1, body0_is_world ? "world" : body0_path.GetAsString().c_str());
+      mjs_setString(eq->name2, body1_is_world ? "world" : body1_path.GetAsString().c_str());
       eq->objtype = mjOBJ_BODY;
     }
 
@@ -2367,6 +2378,18 @@ void PopulateSpecFromTree(pxr::UsdStageRefPtr stage, mjSpec* spec,
     PopulateSpecFromTree(stage, spec, current_mj_body, current_node,
                          child_node.get(), caches);
   }
+
+  // DEBUG HACK ONLY
+  // Compile and save the parsed spec to XML for inspection.
+  // Compiling marks the spec as compiled, which is required for mj_saveXML.
+  // The spec will be cleared and recompiled when the caller calls mj_compile.
+  char error[1000];
+  mjModel* debug_model = mj_compile(spec, nullptr);
+  if (debug_model) {
+    // Use mj_saveXML which works on the spec directly (not the global spec)
+    mj_saveXML(spec, "/tmp/usd_decoded_model.xml", error, sizeof(error));
+    mj_deleteModel(debug_model);
+  }  
 }
 
 mjSpec* ParseStage(const pxr::UsdStageRefPtr stage) {
