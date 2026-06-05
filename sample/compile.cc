@@ -18,19 +18,23 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <vector>
 
 #include <mujoco/mujoco.h>
 
 
 // help
 static constexpr char helpstring[] =
-  "\n Usage:  compile infile outfile\n"
-  "   infile can be in mjcf, urdf, mjb format\n"
+  "\n Usage:  compile infile [outfile]\n"
+  "   infile can be in mjcf, urdf, mjb, usd format\n"
   "   outfile can be in mjcf, mjb, txt format, or empty\n\n"
-  "   if infile is mjcf and outfile is empty, compilation will be "
+  "   if infile is mjcf, urdf, or usd and outfile is empty, compilation will be "
      "timed twice to measure the impact of caching\n\n"
   " Example: compile model.xml [model.mjb]\n";
+
+static constexpr char plugin_dir_name[] = "mujoco_plugin";
 
 
 // timer (seconds)
@@ -62,6 +66,7 @@ int finish(const char* msg = 0, int exitcode = EXIT_SUCCESS, mjModel* m = 0) {
 enum {
   typeUNKNOWN = 0,
   typeXML,
+  typeUSD,
   typeMJB,
   typeTXT,
   typeNONE
@@ -93,12 +98,41 @@ int filetype(const char* filename) {
   // check extension
   if (!std::strcmp(lower+dot, ".xml") || !std::strcmp(lower+dot, ".urdf")) {
     return typeXML;
+  } else if (!std::strcmp(lower+dot, ".usd") ||
+             !std::strcmp(lower+dot, ".usda") ||
+             !std::strcmp(lower+dot, ".usdc") ||
+             !std::strcmp(lower+dot, ".usdz")) {
+    return typeUSD;
   } else if (!std::strcmp(lower+dot, ".mjb")) {
     return typeMJB;
   } else if (!std::strcmp(lower+dot, ".txt")) {
     return typeTXT;
   } else {
     return typeUNKNOWN;
+  }
+}
+
+
+// scan likely plugin directories for decoder plugins
+void scanPluginLibraries(const char* executable) {
+  std::vector<std::filesystem::path> plugin_dirs;
+
+  std::error_code error;
+  std::filesystem::path executable_path(executable ? executable : "");
+  if (!executable_path.empty() && executable_path.has_parent_path()) {
+    std::filesystem::path executable_dir =
+        std::filesystem::weakly_canonical(executable_path, error).parent_path();
+    if (!error) {
+      plugin_dirs.push_back(executable_dir / plugin_dir_name);
+    }
+  }
+
+  plugin_dirs.push_back(std::filesystem::current_path(error) / plugin_dir_name);
+
+  for (const std::filesystem::path& plugin_dir : plugin_dirs) {
+    if (std::filesystem::is_directory(plugin_dir, error)) {
+      mj_loadAllPluginLibraries(plugin_dir.string().c_str(), nullptr);
+    }
   }
 }
 
@@ -118,6 +152,7 @@ int main(int argc, char** argv) {
   // determine file types
   int type1 = filetype(argv[1]);
   int type2 = argc==2 ? typeNONE : filetype(argv[2]);
+  scanPluginLibraries(argv[0]);
 
   // check types
   if (type1 == typeUNKNOWN || type1 == typeTXT ||
@@ -126,18 +161,21 @@ int main(int argc, char** argv) {
   }
 
   // check if output file exists
-  std::FILE* fp = std::fopen(argv[2], "r");
-  if (fp) {
-    std::cout << "Output file already exists, overwrite? (Y/n) ";
-    char c;
-    std::cin >> c;
-    if (c!='y' && c!='Y') {
+  if (argc == 3) {
+    if (std::FILE* fp = std::fopen(argv[2], "r")) {
+      std::cout << "Output file already exists, overwrite? (Y/n) ";
+      char c;
+      std::cin >> c;
+      if (c!='y' && c!='Y') {
+        std::fclose(fp);
+        return finish();
+      }
       std::fclose(fp);
-      return finish();
     }
   }
 
   // load model
+  mjSpec* s = nullptr;
   double first=0, second=0;
   if (type1==typeXML) {
     double starttime = gettm();
@@ -145,8 +183,28 @@ int main(int argc, char** argv) {
     first = gettm() - starttime;
     if (m && type2 == typeNONE) {
       mj_deleteModel(m);
-      starttime = gettm();
+      double starttime = gettm();
       m = mj_loadXML(argv[1], 0, error, 1000);
+      second = gettm() - starttime;
+    }
+  } else if (type1==typeUSD) {
+    double starttime = gettm();
+    s = mj_parse(argv[1], 0, 0, error, 1000);
+    if (!s) {
+      return finish(error, EXIT_FAILURE);
+    }
+
+    m = mj_compile(s, 0);
+    first = gettm() - starttime;
+    if (!m) {
+      mj_deleteSpec(s);
+      return finish("Could not compile model", EXIT_FAILURE);
+    }
+
+    if (type2 == typeNONE) {
+      mj_deleteModel(m);
+      starttime = gettm();
+      m = mj_compile(s, 0);
       second = gettm() - starttime;
     }
   } else {
@@ -155,7 +213,10 @@ int main(int argc, char** argv) {
 
   // check error
   if (!m) {
-    if (type1 == typeXML) {
+    if (s) {
+      mj_deleteSpec(s);
+    }
+    if (type1 == typeXML || type1 == typeUSD) {
       return finish(error, EXIT_FAILURE);
     } else {
       return finish("Could not load model", EXIT_FAILURE);
@@ -164,7 +225,10 @@ int main(int argc, char** argv) {
 
   // save model
   if (type2 == typeXML) {
-    if (!mj_saveLastXML(argv[2], m, error, 1000)) {
+    int result = type1 == typeUSD ? mj_saveXML(s, argv[2], error, 1000)
+                                  : (mj_saveLastXML(argv[2], m, error, 1000) ? 0 : -1);
+    if (result != 0) {
+      if (s) mj_deleteSpec(s);
       return finish(error, EXIT_FAILURE, m);
     }
   } else if (type2 == typeMJB) {
@@ -184,5 +248,8 @@ int main(int argc, char** argv) {
     snprintf(msg, sizeof(msg), "Done.");
   }
 
+  if (s) {
+    mj_deleteSpec(s);
+  }
   return finish(msg, EXIT_SUCCESS, m);
 }
