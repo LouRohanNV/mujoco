@@ -87,10 +87,14 @@ struct UsdCaches {
   pxr::UsdGeomXformCache xform_cache;
   pxr::UsdShadeMaterialBindingAPI::BindingsCache bindings_cache;
   pxr::UsdShadeMaterialBindingAPI::CollectionQueryCache collection_query_cache;
+  pxr::UsdShadeMaterialBindingAPI::BindingsCache physics_bindings_cache;
+  pxr::UsdShadeMaterialBindingAPI::CollectionQueryCache
+      physics_collection_query_cache;
   std::map<pxr::SdfPath, mjsMaterial*> parsed_materials;
 };
 
 constexpr const char* kUsdPrimPathKey = "usd_primpath";
+const pxr::TfToken kPhysicsMaterialPurpose("physics");
 
 void SetUsdPrimPathUserValue(mjsElement* element,
                              const pxr::SdfPath& prim_path) {
@@ -1689,6 +1693,22 @@ void ParseMjcPhysicsMaterialAPI(
   }
 }
 
+bool ParsePhysicsMaterialAPIsIfAuthored(
+    mjsGeom* geom, const pxr::UsdPrim& material_prim) {
+  bool parsed = false;
+  if (material_prim.HasAPI<pxr::UsdPhysicsMaterialAPI>()) {
+    ParseUsdPhysicsMaterialAPI(
+        geom, pxr::UsdPhysicsMaterialAPI(material_prim));
+    parsed = true;
+  }
+  if (material_prim.HasAPI<pxr::MjcPhysicsMaterialAPI>()) {
+    ParseMjcPhysicsMaterialAPI(
+        geom, pxr::MjcPhysicsMaterialAPI(material_prim));
+    parsed = true;
+  }
+  return parsed;
+}
+
 void ParseDisplayColorAndOpacity(const pxr::UsdPrim& prim, mjsGeom* geom) {
   // Convert displayColor and displayOpacity to rgba.
   // We want to support primvar inheritance, hence FindPrimvarWithInheritance.
@@ -1792,18 +1812,26 @@ void ParseUsdPhysicsCollider(mjSpec* spec,
     ParseMjcPhysicsCollisionAPI(geom, pxr::MjcPhysicsCollisionAPI(prim));
   }
 
+  pxr::UsdShadeMaterialBindingAPI material_binding_api(prim);
+  pxr::UsdShadeMaterial physics_material =
+      material_binding_api.ComputeBoundMaterial(
+          &caches.physics_bindings_cache, &caches.physics_collection_query_cache,
+          kPhysicsMaterialPurpose);
+  bool parsed_physics_material = false;
+  if (physics_material) {
+    parsed_physics_material =
+        ParsePhysicsMaterialAPIsIfAuthored(geom, physics_material.GetPrim());
+  }
+
   pxr::UsdShadeMaterial bound_material =
-      pxr::UsdShadeMaterialBindingAPI(prim).ComputeBoundMaterial(
+      material_binding_api.ComputeBoundMaterial(
           &caches.bindings_cache, &caches.collection_query_cache);
   if (bound_material) {
     pxr::UsdPrim bound_material_prim = bound_material.GetPrim();
-    if (bound_material_prim.HasAPI<pxr::UsdPhysicsMaterialAPI>() ||
-        bound_material_prim.HasAPI<pxr::MjcPhysicsMaterialAPI>()) {
-      ParseUsdPhysicsMaterialAPI(
-          geom, pxr::UsdPhysicsMaterialAPI(bound_material_prim));
-      ParseMjcPhysicsMaterialAPI(
-          geom, pxr::MjcPhysicsMaterialAPI(bound_material_prim));
+    if (!parsed_physics_material) {
+      ParsePhysicsMaterialAPIsIfAuthored(geom, bound_material_prim);
     }
+
     pxr::SdfPath material_path = bound_material_prim.GetPath();
     mjsMaterial* material = nullptr;
     if (auto iter = caches.parsed_materials.find(material_path);
