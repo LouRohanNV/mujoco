@@ -48,6 +48,7 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
+#include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
 #include <pxr/usd/usd/prim.h>
@@ -95,6 +96,41 @@ struct UsdCaches {
 
 constexpr const char* kUsdPrimPathKey = "usd_primpath";
 const pxr::TfToken kPhysicsMaterialPurpose("physics");
+
+std::string StripExtension(std::string filename) {
+  const std::size_t slash = filename.find_last_of("/\\");
+  if (slash != std::string::npos) {
+    filename = filename.substr(slash + 1);
+  }
+  const std::size_t dot = filename.find_last_of('.');
+  if (dot != std::string::npos) {
+    filename.erase(dot);
+  }
+  return filename;
+}
+
+std::string GetStageModelName(const pxr::UsdStageRefPtr& stage) {
+  pxr::UsdPrim default_prim = stage->GetDefaultPrim();
+  if (default_prim) {
+    std::string display_name = default_prim.GetDisplayName();
+    if (!display_name.empty()) {
+      return display_name;
+    }
+    std::string prim_name = default_prim.GetName().GetString();
+    if (!prim_name.empty()) {
+      return prim_name;
+    }
+  }
+
+  if (pxr::SdfLayerHandle root_layer = stage->GetRootLayer()) {
+    std::string layer_stem = StripExtension(root_layer->GetDisplayName());
+    if (!layer_stem.empty()) {
+      return layer_stem;
+    }
+  }
+
+  return "";
+}
 
 void SetUsdPrimPathUserValue(mjsElement* element,
                              const pxr::SdfPath& prim_path) {
@@ -2438,6 +2474,10 @@ void PopulateSpecFromTree(pxr::UsdStageRefPtr stage, mjSpec* spec,
 
 mjSpec* ParseStage(const pxr::UsdStageRefPtr stage) {
   mjSpec* spec = mj_makeSpec();
+  std::string model_name = GetStageModelName(stage);
+  if (!model_name.empty()) {
+    mjs_setString(spec->modelname, model_name.c_str());
+  }
 
   std::unique_ptr<Node> root = BuildKinematicTree(stage);
 
