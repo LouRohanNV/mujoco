@@ -96,6 +96,7 @@ struct UsdCaches {
 
 constexpr const char* kUsdPrimPathKey = "usd_primpath";
 const pxr::TfToken kPhysicsMaterialPurpose("physics");
+const pxr::TfToken kMjcBodyGravcompAttr("mjc:body:gravcomp");
 
 std::string StripExtension(std::string filename) {
   const std::size_t slash = filename.find_last_of("/\\");
@@ -880,6 +881,17 @@ void ParseUsdPhysicsMassAPIForBody(mjsBody* body,
 
   if (has_mass && has_diagonal_inertia) {
     body->explicitinertial = true;
+  }
+}
+
+void ParseMjcBodyCustomAttributes(mjsBody* body, const pxr::UsdPrim& prim) {
+  // Compatibility bridge for converter-authored concept-gap attributes that
+  // are not part of the generated mjcPhysics schema.
+  pxr::UsdAttribute gravcomp_attr = prim.GetAttribute(kMjcBodyGravcompAttr);
+  if (gravcomp_attr.HasAuthoredValue()) {
+    float gravcomp;
+    gravcomp_attr.Get(&gravcomp);
+    body->gravcomp = gravcomp;
   }
 }
 
@@ -2397,6 +2409,7 @@ mjsBody* ParseUsdPhysicsRigidbody(
   if (prim.HasAPI<pxr::UsdPhysicsMassAPI>()) {
     ParseUsdPhysicsMassAPIForBody(body, pxr::UsdPhysicsMassAPI(prim));
   }
+  ParseMjcBodyCustomAttributes(body, prim);
 
   // The value is a pointer to a newly allocated SdfPath, which will be deleted
   // when the mjsElement is deleted.
